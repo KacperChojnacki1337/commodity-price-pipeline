@@ -1,0 +1,76 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.1
+  env_file:
+    - .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@postgres-airflow:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${WEBSERVER_SECRET_KEY}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./dbt:/opt/airflow/dbt
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./tests:/opt/airflow/tests
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+    postgres-data:
+      condition: service_healthy
+
+services:
+  postgres-airflow:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME}
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER}"]
+      interval: 10s
+      retries: 5
+
+  postgres-data:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${COMMODITY_DB_USER}
+      POSTGRES_PASSWORD: ${COMMODITY_DB_PASSWORD}
+      POSTGRES_DB: ${COMMODITY_DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${COMMODITY_DB_USER}"]
+      interval: 10s
+      retries: 5
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command: /opt/airflow/dags/init_airflow.sh
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+
+volumes:
+  postgres_airflow_data:
+  postgres_data:
