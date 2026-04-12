@@ -1,7 +1,7 @@
 version: '3.8'
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.1
+  build: .
   env_file:
     - .env
   environment:
@@ -11,12 +11,14 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__WEBSERVER__SECRET_KEY: ${WEBSERVER_SECRET_KEY}
+    _PIP_ADDITIONAL_REQUIREMENTS: ''
   volumes:
     - ./dags:/opt/airflow/dags
     - ./dbt:/opt/airflow/dbt
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./tests:/opt/airflow/tests
+    - ./requirements.txt:/requirements.txt
   depends_on:
     postgres-airflow:
       condition: service_healthy
