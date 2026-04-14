@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from airflow.decorators import dag, task
 from airflow.models import Variable
 
-from utils.postgres_utils import load_to_raw, log_ingestion
+from utils.postgres_utils import load_to_raw_upsert, log_ingestion
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +122,11 @@ def ingest_eia_dag():
         # Usuń duplikaty — ten sam dzień + commodity
         df = df.drop_duplicates(subset=["price_date", "commodity"])
 
-        rows_loaded = load_to_raw(
+        rows_loaded = load_to_raw_upsert(
             df=df,
             table="raw.eia_prices",
             dag_run_id=context["run_id"],
+            conflict_columns=["price_date", "commodity"],
         )
 
         duration = round(time.time() - start_time, 2)

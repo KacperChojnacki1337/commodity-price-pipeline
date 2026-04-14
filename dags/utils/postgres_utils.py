@@ -5,23 +5,36 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 logger = logging.getLogger(__name__)
 
 
-def load_to_raw(df, table: str, dag_run_id: str) -> int:
+def load_to_raw_upsert(df, table: str, dag_run_id: str, conflict_columns: list) -> int:
     hook = PostgresHook(postgres_conn_id="commodity_postgres")
 
     df["_ingested_at"] = datetime.utcnow()
     df["_dag_run_id"] = dag_run_id
 
-    rows = [tuple(row) for row in df.itertuples(index=False)]
+    conn = hook.get_conn()
+    cursor = conn.cursor()
+
     columns = list(df.columns)
+    placeholders = ", ".join(["%s"] * len(columns))
+    col_names = ", ".join(columns)
 
-    hook.insert_rows(
-        table=table,
-        rows=rows,
-        target_fields=columns,
-        replace=False,
-    )
+    update_cols = [c for c in columns if c not in conflict_columns]
+    update_clause = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+    conflict_clause = ", ".join(conflict_columns)
 
-    logger.info(f"Loaded {len(rows)} rows into {table}")
+    sql = f"""
+        INSERT INTO {table} ({col_names})
+        VALUES ({placeholders})
+        ON CONFLICT ({conflict_clause})
+        DO UPDATE SET {update_clause}
+    """
+
+    rows = [tuple(row) for row in df.itertuples(index=False)]
+    cursor.executemany(sql, rows)
+    conn.commit()
+    cursor.close()
+
+    logger.info(f"Upserted {len(rows)} rows into {table}")
     return len(rows)
 
 
