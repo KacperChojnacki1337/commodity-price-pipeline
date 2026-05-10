@@ -1,11 +1,8 @@
-import os
 import time
 import logging
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-
-import yfinance as yf
 
 from airflow.decorators import dag, task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -30,13 +27,56 @@ default_args = {
 
 
 def get_session() -> requests.Session:
-    """Tworzy sesję HTTP z nagłówkami przeglądarki — Yahoo blokuje requesty bez nich."""
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "application/json",
     })
     return session
+
+
+def fetch_ticker_data(session: requests.Session, ticker: str, start_date: str, end_date: str) -> list:
+    """Pobiera dane bezpośrednio z Yahoo Finance API z naszą sesją."""
+    import time as t
+
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+    end_ts   = int(datetime.strptime(end_date,   "%Y-%m-%d").timestamp())
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {
+        "period1":  start_ts,
+        "period2":  end_ts,
+        "interval": "1d",
+        "events":   "history",
+    }
+
+    response = session.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+
+    result = data.get("chart", {}).get("result", [])
+    if not result:
+        return []
+
+    chart     = result[0]
+    timestamps = chart.get("timestamp", [])
+    indicators = chart.get("indicators", {}).get("quote", [{}])[0]
+
+    records = []
+    for i, ts in enumerate(timestamps):
+        price_date = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+        records.append({
+            "price_date": price_date,
+            "ticker":     ticker,
+            "open":       round(float(indicators["open"][i]),   4) if indicators.get("open")   and indicators["open"][i]   is not None else None,
+            "high":       round(float(indicators["high"][i]),   4) if indicators.get("high")   and indicators["high"][i]   is not None else None,
+            "low":        round(float(indicators["low"][i]),    4) if indicators.get("low")    and indicators["low"][i]    is not None else None,
+            "close":      round(float(indicators["close"][i]),  4) if indicators.get("close")  and indicators["close"][i]  is not None else None,
+            "volume":     int(indicators["volume"][i])             if indicators.get("volume") and indicators["volume"][i] is not None else None,
+            "_source":    "yfinance",
+        })
+
+    return records
 
 
 @dag(
@@ -57,37 +97,19 @@ def ingest_yfinance_dag():
             datetime.strptime(execution_date, "%Y-%m-%d") - timedelta(days=7)
         ).strftime("%Y-%m-%d")
 
-        session = get_session()
+        session     = get_session()
         all_records = []
 
         for ticker, commodity_name in TICKERS.items():
             logger.info(f"Fetching {ticker} ({commodity_name})")
-
             try:
-                tk = yf.Ticker(ticker, session=session)
-                data = tk.history(start=start_date, end=execution_date)
-
-                if data.empty:
+                records = fetch_ticker_data(session, ticker, start_date, execution_date)
+                if not records:
                     logger.warning(f"Brak danych dla {ticker}")
                     continue
-
-                data = data.reset_index()
-                data.columns = [c.lower().replace(" ", "_") for c in data.columns]
-
-                for _, row in data.iterrows():
-                    all_records.append({
-                        "price_date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"], "strftime") else str(row["date"])[:10],
-                        "ticker":  ticker,
-                        "open":    round(float(row["open"]), 4)   if pd.notna(row.get("open"))   else None,
-                        "high":    round(float(row["high"]), 4)   if pd.notna(row.get("high"))   else None,
-                        "low":     round(float(row["low"]), 4)    if pd.notna(row.get("low"))    else None,
-                        "close":   round(float(row["close"]), 4)  if pd.notna(row.get("close"))  else None,
-                        "volume":  int(row["volume"])             if pd.notna(row.get("volume")) else None,
-                        "_source": "yfinance",
-                    })
-
-                logger.info(f"Pobrano {len(data)} rekordów dla {ticker}")
-
+                all_records.extend(records)
+                logger.info(f"Pobrano {len(records)} rekordów dla {ticker}")
+                time.sleep(1)  # krótka przerwa między tickerami
             except Exception as e:
                 logger.error(f"Błąd przy pobieraniu {ticker}: {e}")
                 continue
@@ -98,7 +120,7 @@ def ingest_yfinance_dag():
     @task()
     def load_yfinance_to_raw(payload: dict, **context) -> int:
         start_time = time.time()
-        records = payload["records"]
+        records    = payload["records"]
         execution_date = payload["execution_date"]
 
         if not records:
@@ -124,7 +146,6 @@ def ingest_yfinance_dag():
         )
 
         duration = round(time.time() - start_time, 2)
-
         log_ingestion(
             dag_id=context["dag"].dag_id,
             task_id=context["task"].task_id,
@@ -140,7 +161,6 @@ def ingest_yfinance_dag():
     @task()
     def verify_load(rows_loaded: int, **context) -> None:
         execution_date = context["ds"]
-
         hook = PostgresHook(postgres_conn_id="commodity_postgres")
         count = hook.get_first(
             """
@@ -158,7 +178,7 @@ def ingest_yfinance_dag():
             raise ValueError("Dane nie trafiły do bazy mimo pozytywnego zapisu!")
 
     payload = fetch_yfinance_prices()
-    rows = load_yfinance_to_raw(payload)
+    rows    = load_yfinance_to_raw(payload)
     verify_load(rows)
 
 
